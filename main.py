@@ -1,24 +1,82 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+import asyncio
+from datetime import datetime
+import time
+from astrbot.api.event import filter
+from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core import AstrBotConfig
+from astrbot.core.message.components import Poke
+from astrbot.core.platform import AstrMessageEvent
+import pyautogui
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
-    def __init__(self, context: Context):
+
+@register(
+    "astrbot_plugin_jietu",
+    "BvzRays",
+    "戳一戳截图，可用作状态监控",
+    "v1.0.0",
+    "https://github.com/BvzRays/astrbot_plugin_jietu",
+)
+class ScreenshotPlugin(Star):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_screenshot")
+        self.screen_width, self.screen_height = pyautogui.size()
+        self.last_trigger_time: dict = {}
+        self.cooldown_seconds: int = 1  # 戳一戳冷却时间（秒）
+        self.poke_screenshot: bool = config.get("poke_screenshot", True)  # 默认开启戳一戳截图
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
-    
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+    async def _capture(self) -> str:
+        """核心截图方法：生成带时间戳的截图文件并返回路径"""
+        save_name = datetime.now().strftime("screenshot_%Y%m%d_%H%M%S.png")
+        save_path = self.plugin_data_dir / save_name
+        # 使用线程执行截图操作避免阻塞
+        screenshot = await asyncio.to_thread(pyautogui.screenshot)
+        await asyncio.to_thread(screenshot.save, save_path)
+        return str(save_path)
 
-    async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+    @filter.command("截屏")  # 移除了管理员权限限制
+    async def on_capture(self, event: AstrMessageEvent):
+        """处理「截屏」文字指令"""
+        # 直接返回截图结果
+        yield event.image_result(await self._capture())
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_poke(self, event: AiocqhttpMessageEvent):
+        """处理戳一戳事件触发截图"""
+        if not self.poke_screenshot:
+            return  # 配置关闭时直接返回
+        
+        # 获取消息对象（兼容可能的属性缺失）
+        message_obj = getattr(event, "message_obj", {})
+        # 获取原始消息内容（通常是字典格式）
+        raw_message = getattr(message_obj, "raw_message", {})
+        # 获取消息列表（第一个元素应为 Poke 对象）
+        message_list = getattr(message_obj, "message", [])
+
+        # 验证戳一戳消息格式（确保是针对机器人的戳一戳）
+        if (
+            not isinstance(raw_message, dict)  # 确保 raw_message 是字典
+            or not message_list
+            or not isinstance(message_list[0], Poke)  # 确保第一条消息是 Poke 类型
+        ):
+            return
+
+
+        user_id: int = raw_message.get("user_id", 0)
+        target_id: int = raw_message.get("target_id", 0)  # 目标 ID（机器人自身 ID）
+        self_id: int = raw_message.get("self_id", 0)  # 机器人自身 ID
+
+        # 过滤与自身无关的戳一戳（确保是戳机器人）
+        if target_id != self_id:
+            return
+
+        # 冷却机制：防止频繁触发（使用正确的 user_id 记录冷却时间）
+        current_time = time.monotonic()
+        last_time = self.last_trigger_time.get(user_id, 0)
+        if current_time - last_time < self.cooldown_seconds:
+            return
+        self.last_trigger_time[user_id] = current_time
+
+        # 触发截图并返回结果
+        yield event.image_result(await self._capture())
