@@ -13,7 +13,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 @register(
     "astrbot_plugin_jietu",
     "BvzRays",
-    "戳一戳截图，可用作状态监控",
+    "戳一戳截图，可用作状态监控，改自screenctrl，取消了权限限制",
     "v1.0.0",
     "https://github.com/BvzRays/astrbot_plugin_jietu",
 )
